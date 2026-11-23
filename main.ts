@@ -35,8 +35,14 @@ const highs: bigint[] = [];
 let barsSeen = 0;
 /** Highest close since the current position opened; null while flat. */
 let peakClose: bigint | null = null;
+/** A sell was decided on the previous batch and its fill is not yet confirmed:
+ * the batch after it carries the fill (or its rejection) in batch.fills. */
+let exitPending = false;
 /** Seq of the batch on which the last exit was decided; entries are blocked
- * for COOLDOWN_BARS after it. */
+ * for COOLDOWN_BARS after it. Set only once the exit's fill is confirmed, so
+ * a sell the market rejects (a gap past max_slippage_bps) leaves the peak
+ * untouched and the stop fires again on the next bar instead of re-arming
+ * from the gapped close. */
 let lastExitSeq = -1000000;
 
 function trailLimit(peak: bigint): bigint {
@@ -57,11 +63,23 @@ await runBars({
     const held = state.positions.get(SYMBOL);
     const inPosition = held !== undefined && held.qty > 0n;
 
+    if (exitPending) {
+      if (!inPosition) {
+        // The decided sell filled on this batch's open: the exit counts from
+        // the batch that decided it, one before this one.
+        lastExitSeq = state.seq - 1;
+        peakClose = null;
+      }
+      // Still holding: the sell was rejected at its fill, so the peak stands
+      // and the stop below re-fires on this bar. Either way the pending flag
+      // clears: the next batch brings a fresh verdict.
+      exitPending = false;
+    }
+
     if (inPosition) {
       if (peakClose === null || close > peakClose) peakClose = close;
       if (peakClose !== null && close < trailLimit(peakClose)) {
-        lastExitSeq = state.seq;
-        peakClose = null;
+        exitPending = true;
         return [{ side: 'sell', symbol: SYMBOL, qty: held.qty, max_slippage_bps: MAX_SLIPPAGE_BPS }];
       }
       return [];
